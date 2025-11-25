@@ -17,7 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +27,7 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/joho/godotenv"
 )
 
 const TIMEOUT = 5
@@ -38,6 +41,7 @@ type ShowInfo struct {
 	Weekday string
 	Time    string
 	CanBuy  bool
+	BuyLink string
 }
 type Show struct {
 	Title string
@@ -138,11 +142,17 @@ func parsePages(ctx context.Context, url string, availableShows []ShowEntry) Sho
 	// })
 	for _, show := range availableShows {
 		if show.Detail.Title == title || strings.ReplaceAll(show.Detail.Title, "е", "ё") == title {
+			canBuy := show.Detail.HasTickets || show.Detail.SalesOn
+			buyLink := ""
+			if canBuy {
+				buyLink = buildVakhtangovBuyLink(show.StageUID, show.DateTimeKey)
+			}
 			showsInfo = append(showsInfo, ShowInfo{
 				Date:    stringifyDateWithYear(show.Start),
 				Weekday: weekdayRu(show.Start.Weekday()),
 				Time:    show.Start.Format("15:04"),
-				CanBuy:  show.Detail.HasTickets || show.Detail.SalesOn,
+				CanBuy:  canBuy,
+				BuyLink: buyLink,
 			})
 		}
 	}
@@ -151,6 +161,20 @@ func parsePages(ctx context.Context, url string, availableShows []ShowEntry) Sho
 		Title: title,
 		Info:  showsInfo,
 	}
+}
+
+func buildVakhtangovBuyLink(stageUID, datetimeKey string) string {
+	stage := strings.TrimSpace(stageUID)
+	datetime := strings.TrimSpace(datetimeKey)
+	if stage == "" || datetime == "" {
+		return ""
+	}
+
+	values := url.Values{}
+	values.Set("stageuid", stage)
+	values.Set("datetime", datetime)
+
+	return "https://vakhtangov.ru/tickets/buy/?" + values.Encode()
 }
 
 func stringifyDate(date time.Time) string {
@@ -215,9 +239,9 @@ func weekdayRu(w time.Weekday) string {
 func main() {
 	// Загружаем переменные окружения из .env файла
 	// Игнорируем ошибку, если файл не найден (переменные могут быть установлены другим способом)
-	// if err := godotenv.Load(); err != nil {
-	// 	log.Printf("Warning: .env file not found or error loading: %v", err)
-	// }
+	if err := godotenv.Load(); err != nil {
+		log.Printf("Warning: .env file not found or error loading: %v", err)
+	}
 
 	// Если запущено как бот
 	if os.Getenv("RUN_BOT") == "1" && os.Getenv("TELEGRAM_BOT_TOKEN") != "" {
@@ -236,8 +260,11 @@ func main() {
 		return
 	}
 
-	availableShows := GetAvailableShows()
-
+	availableShows, err := GetAvailableShows()
+	if err != nil {
+		logError(errors.Join(errors.New("failed to get available shows:\t"), err))
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), TIMEOUT*time.Second)
 	defer cancel()
 
@@ -283,6 +310,9 @@ func main() {
 					inf.Time,
 					status,
 				)
+				if inf.CanBuy && inf.BuyLink != "" {
+					result += fmt.Sprintf("Ссылка для покупки: %s\n", inf.BuyLink)
+				}
 			}
 			resultChan <- result
 

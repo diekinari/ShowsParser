@@ -23,8 +23,10 @@ func FetchAllShows(ctx context.Context) ([]Show, error) {
 	if err != nil {
 		return nil, err
 	}
-	available := GetAvailableShows()
-
+	available, err := GetAvailableShows()
+	if err != nil {
+		return nil, err
+	}
 	wg := &sync.WaitGroup{}
 	wg.Add(len(cfg.URLs))
 	out := make(chan Show, len(cfg.URLs))
@@ -67,6 +69,9 @@ func RenderShowMarkdown(show Show) string {
 			escapeMarkdown(inf.Time),
 			status,
 		))
+		if inf.CanBuy && inf.BuyLink != "" {
+			b.WriteString(fmt.Sprintf("  → [Купить билет](%s)\n", inf.BuyLink))
+		}
 	}
 	return b.String()
 }

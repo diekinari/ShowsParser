@@ -38,11 +38,13 @@ type Data map[string]map[string]ShowDetail
 
 // ShowEntry holds one show with its date time parsed
 type ShowEntry struct {
-	Start  time.Time
-	Detail ShowDetail
+	StageUID    string
+	DateTimeKey string
+	Start       time.Time
+	Detail      ShowDetail
 }
 
-func GetAvailableShows() []ShowEntry {
+func GetAvailableShows() ([]ShowEntry, error) {
 	url := "https://vakhtangov.ru/ticketland_afisha/data.json"
 
 	resp, err := http.Get(url)
@@ -53,18 +55,18 @@ func GetAvailableShows() []ShowEntry {
 
 	var env Envelope
 	if err = json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		panic(err)
+		return nil, fmt.Errorf("insight.go: error unmarshalling data: %w", err)
 	}
 	fmt.Println("CreatedAt:", env.CreatedAt)
 
 	var d Data
 	if err := json.Unmarshal([]byte(env.Data), &d); err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("insight.go: error unmarshalling data: %w", err)
 	}
 
 	// 1) collect all shows into one slice
 	var all []ShowEntry
-	for _, shows := range d {
+	for stageUID, shows := range d {
 		for key, detail := range shows {
 			// parse the key "YYYY-MM-DD-HH-MM-SS"
 			t, err := time.Parse("2006-01-02-15-04-05", key)
@@ -75,11 +77,16 @@ func GetAvailableShows() []ShowEntry {
 					log.Fatalf("cannot parse date %q: %v", key, err)
 				}
 			}
-			all = append(all, ShowEntry{Start: t, Detail: detail})
+			all = append(all, ShowEntry{
+				StageUID:    stageUID,
+				DateTimeKey: key,
+				Start:       t,
+				Detail:      detail,
+			})
 		}
 	}
 
-	return all
+	return all, nil
 }
 
 // insight.go collects the data from ticketland_afisha json, sorts it and prints in the standard output

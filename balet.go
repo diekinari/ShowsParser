@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -32,9 +33,14 @@ type BaletConfig struct {
 }
 
 type BaletShow struct {
-	Title      string
-	CanBuy     bool
-	BuyOptions []string // Опции покупки (дата, время, место)
+	Title    string
+	CanBuy   bool
+	Sessions []BaletSession // Опции покупки (дата, время, место, ссылка)
+}
+
+type BaletSession struct {
+	Info    string // Дата, время, место
+	BuyLink string // Ссылка на покупку
 }
 
 func loadBaletConfig(path string) (*BaletConfig, error) {
@@ -90,7 +96,7 @@ func parseBaletPage(ctx context.Context, url string) BaletShow {
 
 	// Проверяем наличие возможности купить билеты
 	canBuy := false
-	var buyOptions []string
+	var sessions []BaletSession
 
 	// Сначала ищем все блоки/элементы, которые могут содержать информацию о сеансах
 	// Это могут быть таблицы, списки, карточки и т.д.
@@ -100,18 +106,22 @@ func parseBaletPage(ctx context.Context, url string) BaletShow {
 		rowText := strings.TrimSpace(s.Text())
 		// Проверяем, есть ли в строке кнопка "купить билет"
 		hasBuyButton := false
+		var link string
 		s.Find("a, button").Each(func(j int, btn *goquery.Selection) {
 			btnText := strings.ToLower(strings.TrimSpace(btn.Text()))
 			if strings.Contains(btnText, "купить билет") {
 				hasBuyButton = true
 				canBuy = true
+				if href, ok := btn.Attr("href"); ok {
+					link = resolveBaletBuyLink(url, href)
+				}
 			}
 		})
 
 		// Если есть кнопка покупки, извлекаем всю информацию из строки
 		if hasBuyButton {
 			// Ищем дату, время и место в этой строке
-			extractBuyInfoFromText(rowText, &buyOptions)
+			extractSessionsFromText(rowText, link, &sessions)
 		}
 	})
 
@@ -120,6 +130,10 @@ func parseBaletPage(ctx context.Context, url string) BaletShow {
 		text := strings.ToLower(strings.TrimSpace(s.Text()))
 		if strings.Contains(text, "купить билет") {
 			canBuy = true
+			var link string
+			if href, ok := s.Attr("href"); ok {
+				link = resolveBaletBuyLink(url, href)
+			}
 
 			// Ищем информацию в родительском контейнере и его родителях (до 3 уровней вверх)
 			current := s
@@ -129,26 +143,26 @@ func parseBaletPage(ctx context.Context, url string) BaletShow {
 					break
 				}
 				parentText := strings.TrimSpace(parent.Text())
-				extractBuyInfoFromText(parentText, &buyOptions)
+				extractSessionsFromText(parentText, link, &sessions)
 				current = parent
 			}
 
 			// Проверяем предыдущие элементы (часто дата/время идут перед кнопкой)
 			s.PrevAll().Each(func(i int, prev *goquery.Selection) {
 				prevText := strings.TrimSpace(prev.Text())
-				extractBuyInfoFromText(prevText, &buyOptions)
+				extractSessionsFromText(prevText, link, &sessions)
 			})
 
 			// Проверяем следующие элементы
 			s.NextAll().Each(func(i int, next *goquery.Selection) {
 				nextText := strings.TrimSpace(next.Text())
-				extractBuyInfoFromText(nextText, &buyOptions)
+				extractSessionsFromText(nextText, link, &sessions)
 			})
 
 			// Проверяем соседние элементы (братья и сестры)
 			s.Siblings().Each(func(i int, sibling *goquery.Selection) {
 				siblingText := strings.TrimSpace(sibling.Text())
-				extractBuyInfoFromText(siblingText, &buyOptions)
+				extractSessionsFromText(siblingText, link, &sessions)
 			})
 		}
 	})
@@ -177,7 +191,7 @@ func parseBaletPage(ctx context.Context, url string) BaletShow {
 				strings.Contains(lowerText, "зал") ||
 				strings.Contains(lowerText, "концерт") ||
 				strings.Contains(lowerText, "филармония") {
-				extractBuyInfoFromText(text, &buyOptions)
+				extractSessionsFromText(text, "", &sessions)
 			}
 		}
 	})
@@ -187,33 +201,37 @@ func parseBaletPage(ctx context.Context, url string) BaletShow {
 	doc.Find("[class*='ticket'], [class*='buy'], [class*='schedule'], [class*='date'], [class*='time']").Each(func(i int, s *goquery.Selection) {
 		// Проверяем, есть ли рядом кнопка покупки
 		hasBuyButton := false
+		var link string
 		s.Find("a, button").Each(func(j int, btn *goquery.Selection) {
 			btnText := strings.ToLower(strings.TrimSpace(btn.Text()))
 			if strings.Contains(btnText, "купить") || strings.Contains(btnText, "билет") {
 				hasBuyButton = true
 				canBuy = true
+				if href, ok := btn.Attr("href"); ok {
+					link = resolveBaletBuyLink(url, href)
+				}
 			}
 		})
 
 		if hasBuyButton {
 			text := strings.TrimSpace(s.Text())
-			extractBuyInfoFromText(text, &buyOptions)
+			extractSessionsFromText(text, link, &sessions)
 		}
 	})
 
 	// Финальная фильтрация: удаляем дубликаты без театра, если есть версии с театром
-	filteredOptions := filterDuplicateOptions(buyOptions)
+	filteredSessions := filterDuplicateSessions(sessions)
 
 	return BaletShow{
-		Title:      title,
-		CanBuy:     canBuy,
-		BuyOptions: filteredOptions,
+		Title:    title,
+		CanBuy:   canBuy,
+		Sessions: filteredSessions,
 	}
 }
 
-// extractBuyInfoFromText извлекает информацию о билетах из текста
+// extractSessionsFromText извлекает информацию о билетах из текста и создает сессии
 // Ищет строки с датой/временем и названием театра
-func extractBuyInfoFromText(text string, buyOptions *[]string) {
+func extractSessionsFromText(text string, link string, sessions *[]BaletSession) {
 	// Разбиваем текст на строки и слова для более точного поиска
 	lines := strings.Split(text, "\n")
 
@@ -257,8 +275,8 @@ func extractBuyInfoFromText(text string, buyOptions *[]string) {
 
 				// Если в строке есть театр - добавляем как есть
 				if hasTheater {
-					if !contains(*buyOptions, line) && len(line) > 10 && len(line) < 300 {
-						*buyOptions = append(*buyOptions, line)
+					if !containsSession(*sessions, line) && len(line) > 10 && len(line) < 300 {
+						*sessions = append(*sessions, BaletSession{Info: line, BuyLink: link})
 					}
 				} else if len(strings.Fields(line)) >= 2 && len(line) > 8 {
 					// Если театра нет в строке, но есть в общем тексте - добавляем название театра
@@ -294,8 +312,8 @@ func extractBuyInfoFromText(text string, buyOptions *[]string) {
 								if !strings.Contains(strings.ToLower(combinedLine), strings.ToLower(checkLine)) {
 									combinedLine += " " + checkLine
 								}
-								if !contains(*buyOptions, combinedLine) && len(combinedLine) < 300 {
-									*buyOptions = append(*buyOptions, combinedLine)
+								if !containsSession(*sessions, combinedLine) && len(combinedLine) < 300 {
+									*sessions = append(*sessions, BaletSession{Info: combinedLine, BuyLink: link})
 									foundTheater = true
 									break
 								}
@@ -308,8 +326,8 @@ func extractBuyInfoFromText(text string, buyOptions *[]string) {
 						for _, theaterName := range theaterNames {
 							if theaterName != "" {
 								combinedLine := line + " " + theaterName
-								if !contains(*buyOptions, combinedLine) && len(combinedLine) < 300 {
-									*buyOptions = append(*buyOptions, combinedLine)
+								if !containsSession(*sessions, combinedLine) && len(combinedLine) < 300 {
+									*sessions = append(*sessions, BaletSession{Info: combinedLine, BuyLink: link})
 									foundTheater = true
 									break
 								}
@@ -323,11 +341,11 @@ func extractBuyInfoFromText(text string, buyOptions *[]string) {
 						dateTimePart := extractDateTimePart(line)
 						// Проверяем, есть ли уже вариант с театром для этой даты/времени
 						hasBetterVersion := false
-						for _, existing := range *buyOptions {
-							existingDateTime := extractDateTimePart(existing)
+						for _, existing := range *sessions {
+							existingDateTime := extractDateTimePart(existing.Info)
 							// Если дата/время совпадают и в существующем варианте есть театр
 							if existingDateTime == dateTimePart {
-								lowerExisting := strings.ToLower(existing)
+								lowerExisting := strings.ToLower(existing.Info)
 								if strings.Contains(lowerExisting, "мариинский") ||
 									strings.Contains(lowerExisting, "театр") ||
 									strings.Contains(lowerExisting, "бдт") ||
@@ -340,8 +358,8 @@ func extractBuyInfoFromText(text string, buyOptions *[]string) {
 							}
 						}
 						// Добавляем только если нет лучшего варианта с театром
-						if !hasBetterVersion && !contains(*buyOptions, line) {
-							*buyOptions = append(*buyOptions, line)
+						if !hasBetterVersion && !containsSession(*sessions, line) {
+							*sessions = append(*sessions, BaletSession{Info: line, BuyLink: link})
 						}
 					}
 				}
@@ -406,14 +424,14 @@ func extractTheaterName(text, keyword string) string {
 	return ""
 }
 
-// filterDuplicateOptions удаляет дубликаты без театра, если есть версии с театром
-func filterDuplicateOptions(options []string) []string {
-	var filtered []string
+// filterDuplicateSessions удаляет дубликаты без театра, если есть версии с театром
+func filterDuplicateSessions(sessions []BaletSession) []BaletSession {
+	var filtered []BaletSession
 	var seenDateTimeParts []string
 
 	// Сначала добавляем все варианты с театром
-	for _, option := range options {
-		lowerOption := strings.ToLower(option)
+	for _, session := range sessions {
+		lowerOption := strings.ToLower(session.Info)
 		hasTheater := strings.Contains(lowerOption, "мариинский") ||
 			strings.Contains(lowerOption, "театр") ||
 			strings.Contains(lowerOption, "бдт") ||
@@ -424,15 +442,15 @@ func filterDuplicateOptions(options []string) []string {
 			strings.Contains(lowerOption, "филармония")
 
 		if hasTheater {
-			filtered = append(filtered, option)
-			dateTimePart := extractDateTimePart(option)
+			filtered = append(filtered, session)
+			dateTimePart := extractDateTimePart(session.Info)
 			seenDateTimeParts = append(seenDateTimeParts, dateTimePart)
 		}
 	}
 
 	// Затем добавляем варианты без театра, только если для них нет версии с театром
-	for _, option := range options {
-		lowerOption := strings.ToLower(option)
+	for _, session := range sessions {
+		lowerOption := strings.ToLower(session.Info)
 		hasTheater := strings.Contains(lowerOption, "мариинский") ||
 			strings.Contains(lowerOption, "театр") ||
 			strings.Contains(lowerOption, "бдт") ||
@@ -443,7 +461,7 @@ func filterDuplicateOptions(options []string) []string {
 			strings.Contains(lowerOption, "филармония")
 
 		if !hasTheater {
-			dateTimePart := extractDateTimePart(option)
+			dateTimePart := extractDateTimePart(session.Info)
 			// Проверяем, есть ли уже версия с театром для этой даты/времени
 			hasBetterVersion := false
 			for _, seenPart := range seenDateTimeParts {
@@ -453,8 +471,8 @@ func filterDuplicateOptions(options []string) []string {
 				}
 			}
 			// Добавляем только если нет лучшей версии
-			if !hasBetterVersion && !contains(filtered, option) {
-				filtered = append(filtered, option)
+			if !hasBetterVersion && !containsSession(filtered, session.Info) {
+				filtered = append(filtered, session)
 			}
 		}
 	}
@@ -527,13 +545,34 @@ func min(a, b int) int {
 	return b
 }
 
-func contains(slice []string, item string) bool {
+func containsSession(slice []BaletSession, itemInfo string) bool {
 	for _, s := range slice {
-		if s == item {
+		if s.Info == itemInfo {
 			return true
 		}
 	}
 	return false
+}
+
+func resolveBaletBuyLink(pageURL, href string) string {
+	href = strings.TrimSpace(href)
+	if href == "" {
+		return ""
+	}
+
+	parsedHref, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+	if parsedHref.IsAbs() {
+		return parsedHref.String()
+	}
+
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		return parsedHref.String()
+	}
+	return base.ResolveReference(parsedHref).String()
 }
 
 func printBaletResult(show BaletShow) {
@@ -542,10 +581,13 @@ func printBaletResult(show BaletShow) {
 
 	if show.CanBuy {
 		fmt.Println("✅ Билеты доступны для покупки")
-		if len(show.BuyOptions) > 0 {
+		if len(show.Sessions) > 0 {
 			fmt.Println("\nОпции покупки:")
-			for i, option := range show.BuyOptions {
-				fmt.Printf("  %d. %s\n", i+1, option)
+			for i, session := range show.Sessions {
+				fmt.Printf("  %d. %s\n", i+1, session.Info)
+				if session.BuyLink != "" {
+					fmt.Printf("     Ссылка: %s\n", session.BuyLink)
+				}
 			}
 		}
 	} else {
@@ -621,10 +663,13 @@ func RenderBaletShowMarkdown(show BaletShow) string {
 	b.WriteString(fmt.Sprintf("%s\n", status))
 
 	// Buy options
-	if len(show.BuyOptions) > 0 {
+	if len(show.Sessions) > 0 {
 		b.WriteString("\n*Опции покупки:*\n")
-		for _, option := range show.BuyOptions {
-			b.WriteString(fmt.Sprintf("• %s\n", escapeBaletMarkdown(option)))
+		for _, session := range show.Sessions {
+			b.WriteString(fmt.Sprintf("• %s\n", escapeBaletMarkdown(session.Info)))
+			if session.BuyLink != "" {
+				b.WriteString(fmt.Sprintf("  → [Купить билет](%s)\n", session.BuyLink))
+			}
 		}
 	}
 
