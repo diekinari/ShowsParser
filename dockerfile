@@ -10,4 +10,4 @@ COPY . .
 
 RUN go build -o showsparser .
 
-CMD ["./main"]
+CMD ["./showsparser"]

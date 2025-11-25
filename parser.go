@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -26,7 +25,6 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/joho/godotenv"
 )
 
 const TIMEOUT = 5
@@ -217,9 +215,9 @@ func weekdayRu(w time.Weekday) string {
 func main() {
 	// Загружаем переменные окружения из .env файла
 	// Игнорируем ошибку, если файл не найден (переменные могут быть установлены другим способом)
-	if err := godotenv.Load(); err != nil {
-		log.Printf("Warning: .env file not found or error loading: %v", err)
-	}
+	// if err := godotenv.Load(); err != nil {
+	// 	log.Printf("Warning: .env file not found or error loading: %v", err)
+	// }
 
 	// Если запущено как бот
 	if os.Getenv("RUN_BOT") == "1" && os.Getenv("TELEGRAM_BOT_TOKEN") != "" {

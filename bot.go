@@ -17,14 +17,13 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/joho/godotenv"
 )
 
 func RunTelegramBot(ctx context.Context) error {
-	if err := godotenv.Load(); err != nil {
-		return fmt.Errorf(".env file not found or error loading: %w", err)
-	}
-	log.Println("dotenv loaded")
+	// if err := godotenv.Load(); err != nil {
+	// 	return fmt.Errorf(".env file not found or error loading: %w", err)
+	// }
+	// log.Println("dotenv loaded")
 	token := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if token == "" {
 		return fmt.Errorf("TELEGRAM_BOT_TOKEN is not set")
