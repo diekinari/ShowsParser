@@ -127,7 +127,9 @@ func callbackHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if currentAction != "" {
 		// Добавляем время обновления в конец сообщения, чтобы текст менялся
 		// Это предотвращает ошибку "message is not modified" если данные не изменились
-		msg += fmt.Sprintf("\n\n_Обновлено: %s_", time.Now().Format("15:04:05"))
+		// Используем фиксированную зону MSK (UTC+3), так как на сервере может быть UTC
+		mskZone := time.FixedZone("MSK", 3*60*60)
+		msg += fmt.Sprintf("\n\n_Обновлено: %s_", time.Now().In(mskZone).Format("15:04:05"))
 
 		kb = &models.InlineKeyboardMarkup{
 			InlineKeyboard: [][]models.InlineKeyboardButton{
